@@ -1,172 +1,129 @@
-# azure-pipelines.yml  (repo root)
-
-trigger:
-  branches:
-    include:
-      - dev
-      - main
-
-# Run only on your self-hosted agent "local-win" in the Default pool
-pool:
-  name: Default
-  demands:
-    - Agent.OS -equals Windows_NT
-
-variables:
-  pythonVersion: '3.12'                 # Agent must have Python; we create a venv anyway
-  packageDir: 'drop'
-  DEV_WEBAPP: 'calc-dev-web'            # your dev App Service name (Windows)
-  PROD_WEBAPP: 'calc-prod-web'          # your prod App Service name (Windows)
-  serviceConnection: 'sc-azure-calculator'            # name of your Azure RM service connection
+# -----------------------------------------
+# variables you already created as secrets:
+# DEV_PUBPROFILE, PROD_PUBPROFILE
+# -----------------------------------------
 
 stages:
-# -----------------------------
-# Build + Test + Package
-# -----------------------------
 - stage: Build_Test
-  displayName: Install, test, package
+  displayName: Build + Test + Package
   jobs:
-    - job: build
-      displayName: Build & Test
-      workspace:
-        clean: all
-      steps:
-        - checkout: self
-          clean: true
+  - job: build
+    displayName: Build & Test
+    pool:
+      name: Default          # your self-hosted pool with the "local-win" agent
+      demands:
+      - Agent.OS -equals Windows_NT
+    variables:
+      packageDir: 'drop'
+    steps:
+    # (your existing steps)
+    - checkout: self
+      clean: true
 
-        # Optional: confirm Python on agent
-        - task: PowerShell@2
-          displayName: Show agent Python
-          inputs:
-            targetType: inline
-            script: |
-              $PSVersionTable
-              python --version
-              where python
+    - task: CmdLine@2
+      displayName: Show agent Python
+      inputs:
+        script: |
+          ver
+          where py
+          py -3 --version
 
-        # Create venv and install dependencies
-        - task: PowerShell@2
-          displayName: Create venv & install deps
-          inputs:
-            targetType: inline
-            script: |
-              py -3 -m venv .venv
-              .\.venv\Scripts\python -m pip install --upgrade pip wheel
-              .\.venv\Scripts\pip install -r requirements.txt
-              .\.venv\Scripts\pip install pytest pytest-cov
+    - task: CmdLine@2
+      displayName: Create venv & install deps
+      inputs:
+        script: |
+          py -3 -m venv .venv
+          .venv\Scripts\python -m pip install --upgrade pip wheel
+          .venv\Scripts\pip install -r requirements.txt
+          .venv\Scripts\pip install pytest pytest-cov
 
-        # Run tests and produce JUnit XML
-        - task: PowerShell@2
-          displayName: Run pytest
-          inputs:
-            targetType: inline
-            script: |
-              if (Test-Path test-results) { Remove-Item test-results -Recurse -Force }
-              .\.venv\Scripts\pytest -q --junitxml=test-results\pytest.xml --cov=src --cov-report=xml
+    - task: CmdLine@2
+      displayName: Run pytest (with coverage)
+      inputs:
+        script: |
+          if exist test-results rmdir /s /q test-results
+          mkdir test-results
+          .venv\Scripts\python -m pytest -q tests --junitxml=test-results\pytest.xml --cov=src --cov-report=xml
 
-        - task: PublishTestResults@2
-          displayName: Publish test results (JUnit)
-          inputs:
-            testResultsFormat: 'JUnit'
-            testResultsFiles: 'test-results\pytest.xml'
-            failTaskOnFailedTests: true
+    - task: PublishTestResults@2
+      displayName: Publish test results (JUnit)
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: 'test-results\pytest.xml'
+        failTaskOnFailedTests: true
 
-        # Package app into a zip (exclude venv, .git, etc.)
-        - task: ArchiveFiles@2
-          displayName: Zip app
-          inputs:
-            rootFolderOrFile: '$(Build.SourcesDirectory)'
-            includeRootFolder: false
-            archiveType: 'zip'
-            archiveFile: '$(Build.ArtifactStagingDirectory)\app.zip'
-            replaceExistingArchive: true
-            verbose: true
-            # Exclusions
-            # Use newline-separated patterns on Windows:
-            #  Note: patterns are globbed relative to rootFolderOrFile
-            #  The below excludes common junk from the package
-            #  (You can refine as you like.)
-            tarCompression: none
-          # ArchiveFiles@2 lacks first-class excludes on Windows; easiest is to zip only what you need:
-        - task: PowerShell@2
-          displayName: Rebuild zip with only needed files
-          inputs:
-            targetType: inline
-            script: |
-              if (Test-Path "$(Build.ArtifactStagingDirectory)\app.zip") { Remove-Item "$(Build.ArtifactStagingDirectory)\app.zip" -Force }
-              $items = @(
-                "src",
-                "run.bat",
-                "run.sh",
-                "requirements.txt",
-                "pyproject.toml"
-              )
-              Add-Type -AssemblyName System.IO.Compression.FileSystem
-              $zipPath = "$(Build.ArtifactStagingDirectory)\app.zip"
-              [System.IO.Compression.ZipFile]::CreateFromDirectory(".", $zipPath) # quick pre-zip
-              # Recreate with curated content:
-              Remove-Item $zipPath -Force
-              $temp = "$(Build.ArtifactStagingDirectory)\_pkg"
-              if (Test-Path $temp) { Remove-Item $temp -Recurse -Force }
-              New-Item $temp -ItemType Directory | Out-Null
-              foreach ($i in $items) {
-                Copy-Item $i -Destination (Join-Path $temp $i) -Recurse -Force
-              }
-              [System.IO.Compression.ZipFile]::CreateFromDirectory($temp, $zipPath)
-              Remove-Item $temp -Recurse -Force
+    - task: CmdLine@2
+      displayName: Zip app
+      inputs:
+        script: |
+          if exist "$(Build.ArtifactStagingDirectory)\app.zip" del /q "$(Build.ArtifactStagingDirectory)\app.zip"
+          if exist _pkg rmdir /s /q _pkg
+          mkdir _pkg
+          xcopy /e /i /y src _pkg\src
+          if exist run.bat copy /y run.bat _pkg\
+          if exist run.sh copy /y run.sh _pkg\
+          if exist requirements.txt copy /y requirements.txt _pkg\
+          if exist pyproject.toml copy /y pyproject.toml _pkg\
+          powershell -NoLogo -NoProfile -Command ^
+            "Add-Type -AssemblyName System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::CreateFromDirectory('_pkg', '$(Build.ArtifactStagingDirectory)\app.zip')"
+          rmdir /s /q _pkg
 
-        - task: PublishBuildArtifacts@1
-          displayName: Publish artifact
-          inputs:
-            PathtoPublish: '$(Build.ArtifactStagingDirectory)'
-            ArtifactName: '$(packageDir)'
+    - task: PublishBuildArtifacts@1
+      displayName: Publish artifact
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: 'drop'
 
-# -----------------------------
-# Deploy to Dev (branch = dev)
-# -----------------------------
+# ---------- Deploy to DEV ----------
 - stage: Deploy_Dev
   displayName: Deploy to Dev (calc-dev-web)
   dependsOn: Build_Test
-  condition: and(succeeded(), eq(variables['Build.SourceBranchName'], 'dev'))
+  condition: succeeded()
   jobs:
-    - deployment: deploy_dev
-      displayName: Zip Deploy to Dev Web
-      environment: 'dev-web'
-      strategy:
-        runOnce:
-          deploy:
-            steps:
-              - download: current
-                artifact: 'drop'
-              - task: AzureWebApp@1
-                displayName: Deploy to $(DEV_WEBAPP)
-                inputs:
-                  azureSubscription: '$(serviceConnection)'
-                  appType: 'webApp'
-                  appName: '$(DEV_WEBAPP)'
-                  package: '$(Pipeline.Workspace)\drop\app.zip'
+  - deployment: deploy_dev
+    environment: dev-web
+    strategy:
+      runOnce:
+        deploy:
+          pool:
+            name: Default
+            demands:
+            - Agent.OS -equals Windows_NT
+          steps:
+          - download: current
+            artifact: drop
 
-# -----------------------------
-# Deploy to Prod (branch = main)
-# -----------------------------
+          - task: AzureWebApp@1
+            displayName: Zip Deploy to calc-dev-web (publish profile)
+            inputs:
+              appType: 'webApp'
+              appName: 'calc-dev-web'
+              package: '$(Pipeline.Workspace)\drop\app.zip'
+              publishProfile: '$(DEV_PUBPROFILE)'   # secret variable with full XML
+
+# ---------- Deploy to PROD (manual approval suggested) ----------
 - stage: Deploy_Prod
   displayName: Deploy to Prod (calc-prod-web)
-  dependsOn: Build_Test
-  condition: and(succeeded(), eq(variables['Build.SourceBranchName'], 'main'))
+  dependsOn: Deploy_Dev
+  condition: succeeded()
   jobs:
-    - deployment: deploy_prod
-      displayName: Zip Deploy to Prod Web
-      environment: 'prod-web'
-      strategy:
-        runOnce:
-          deploy:
-            steps:
-              - download: current
-                artifact: 'drop'
-              - task: AzureWebApp@1
-                displayName: Deploy to $(PROD_WEBAPP)
-                inputs:
-                  azureSubscription: '$(serviceConnection)'
-                  appType: 'webApp'
-                  appName: '$(PROD_WEBAPP)'
-                  package: '$(Pipeline.Workspace)\drop\app.zip'
+  - deployment: deploy_prod
+    environment: prod-web
+    strategy:
+      runOnce:
+        deploy:
+          pool:
+            name: Default
+            demands:
+            - Agent.OS -equals Windows_NT
+          steps:
+          - download: current
+            artifact: drop
+
+          - task: AzureWebApp@1
+            displayName: Zip Deploy to calc-prod-web (publish profile)
+            inputs:
+              appType: 'webApp'
+              appName: 'calc-prod-web'
+              package: '$(Pipeline.Workspace)\drop\app.zip'
+              publishProfile: '$(PROD_PUBPROFILE)'
