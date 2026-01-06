@@ -4,19 +4,19 @@
 # -----------------------------------------
 
 stages:
+# ===== Build & Test =====
 - stage: Build_Test
   displayName: Build + Test + Package
   jobs:
   - job: build
     displayName: Build & Test
     pool:
-      name: Default          # your self-hosted pool with the "local-win" agent
+      name: Default
       demands:
       - Agent.OS -equals Windows_NT
     variables:
       packageDir: 'drop'
     steps:
-    # (your existing steps)
     - checkout: self
       clean: true
 
@@ -60,8 +60,8 @@ stages:
           if exist _pkg rmdir /s /q _pkg
           mkdir _pkg
           xcopy /e /i /y src _pkg\src
-          if exist run.bat copy /y run.bat _pkg\
           if exist run.sh copy /y run.sh _pkg\
+          if exist run.bat copy /y run.bat _pkg\
           if exist requirements.txt copy /y requirements.txt _pkg\
           if exist pyproject.toml copy /y pyproject.toml _pkg\
           powershell -NoLogo -NoProfile -Command ^
@@ -74,7 +74,7 @@ stages:
         PathtoPublish: '$(Build.ArtifactStagingDirectory)'
         ArtifactName: 'drop'
 
-# ---------- Deploy to DEV ----------
+# ===== Deploy DEV (Linux) =====
 - stage: Deploy_Dev
   displayName: Deploy to Dev (calc-dev-web)
   dependsOn: Build_Test
@@ -93,15 +93,25 @@ stages:
           - download: current
             artifact: drop
 
+          # Ensure Linux app knows how to start: use run.sh at zip root
+          - task: AzureAppServiceSettings@1
+            displayName: App settings + startup (Linux)
+            inputs:
+              appName: 'calc-dev-web'
+              appSettings: |
+                -name SCM_DO_BUILD_DURING_DEPLOYMENT -value false -slotSetting false
+                -name WEBSITES_ENABLE_APP_SERVICE_STORAGE -value true -slotSetting false
+              startupCommand: 'bash run.sh'
+
           - task: AzureWebApp@1
             displayName: Zip Deploy to calc-dev-web (publish profile)
             inputs:
-              appType: 'webApp'
+              appType: 'webAppLinux'
               appName: 'calc-dev-web'
-              package: '$(Pipeline.Workspace)\drop\app.zip'
-              publishProfile: '$(DEV_PUBPROFILE)'   # secret variable with full XML
+              package: '$(Pipeline.Workspace)/drop/app.zip'
+              publishProfile: '$(DEV_PUBPROFILE)'
 
-# ---------- Deploy to PROD (manual approval suggested) ----------
+# ===== Deploy PROD (Linux) =====
 - stage: Deploy_Prod
   displayName: Deploy to Prod (calc-prod-web)
   dependsOn: Deploy_Dev
@@ -120,10 +130,19 @@ stages:
           - download: current
             artifact: drop
 
+          - task: AzureAppServiceSettings@1
+            displayName: App settings + startup (Linux)
+            inputs:
+              appName: 'calc-prod-web'
+              appSettings: |
+                -name SCM_DO_BUILD_DURING_DEPLOYMENT -value false -slotSetting false
+                -name WEBSITES_ENABLE_APP_SERVICE_STORAGE -value true -slotSetting false
+              startupCommand: 'bash run.sh'
+
           - task: AzureWebApp@1
             displayName: Zip Deploy to calc-prod-web (publish profile)
             inputs:
-              appType: 'webApp'
+              appType: 'webAppLinux'
               appName: 'calc-prod-web'
-              package: '$(Pipeline.Workspace)\drop\app.zip'
+              package: '$(Pipeline.Workspace)/drop/app.zip'
               publishProfile: '$(PROD_PUBPROFILE)'
