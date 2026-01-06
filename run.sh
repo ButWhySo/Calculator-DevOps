@@ -1,3 +1,3 @@
 #!/usr/bin/env bash
-export FLASK_APP=flask_calc_web.app:app
-flask run --debug --port 8000
+source .venv/Scripts/activate 2>/dev/null || source .venv/bin/activate
+python -m flask --app src.app:app run --debug --port 8000
