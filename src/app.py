@@ -50,4 +50,3 @@ def index():
         except Exception as e:
             result = f"Error: {e}"
     return render_template_string(PAGE, result=result)
- 
