@@ -1,182 +1,172 @@
-# .azure-pipelines/ci-cd.yml
+# azure-pipelines.yml  (repo root)
+
 trigger:
   branches:
     include:
       - dev
       - main
 
-pr:
-  branches:
-    include:
-      - dev
-      - main
+# Run only on your self-hosted agent "local-win" in the Default pool
+pool:
+  name: Default
+  demands:
+    - Agent.OS -equals Windows_NT
 
 variables:
-  PYTHON_VERSION: '3.12'
-  # Artifacts
-  ARTIFACT_NAME: 'drop'
-  ZIP_NAME: 'app.zip'
-  # Paths in your repo (per your screenshots)
-  SRC_DIR: 'src'
-  TESTS_DIR: 'tests'
-  # Startup is configured in the Web App (Portal) – nothing to set here.
-
-pool:
-  vmImage: 'windows-latest'     # If you don’t have hosted parallelism yet, use your self-hosted agent
+  pythonVersion: '3.12'                 # Agent must have Python; we create a venv anyway
+  packageDir: 'drop'
+  DEV_WEBAPP: 'calc-dev-web'            # your dev App Service name (Windows)
+  PROD_WEBAPP: 'calc-prod-web'          # your prod App Service name (Windows)
+  serviceConnection: 'sc-azure-calculator'            # name of your Azure RM service connection
 
 stages:
-
-# ---------- 1) Build & Test ----------
-- stage: build_test
-  displayName: 'Build & Test'
+# -----------------------------
+# Build + Test + Package
+# -----------------------------
+- stage: Build_Test
+  displayName: Install, test, package
   jobs:
     - job: build
-      displayName: 'Install, test, package'
+      displayName: Build & Test
+      workspace:
+        clean: all
       steps:
         - checkout: self
-          fetchDepth: 1
+          clean: true
 
-        - task: UsePythonVersion@0
+        # Optional: confirm Python on agent
+        - task: PowerShell@2
+          displayName: Show agent Python
           inputs:
-            versionSpec: '$(PYTHON_VERSION)'
+            targetType: inline
+            script: |
+              $PSVersionTable
+              python --version
+              where python
 
-        - script: |
-            python -m pip install --upgrade pip
-            if exist requirements.txt ( pip install -r requirements.txt )
-          displayName: 'Install dependencies'
+        # Create venv and install dependencies
+        - task: PowerShell@2
+          displayName: Create venv & install deps
+          inputs:
+            targetType: inline
+            script: |
+              py -3 -m venv .venv
+              .\.venv\Scripts\python -m pip install --upgrade pip wheel
+              .\.venv\Scripts\pip install -r requirements.txt
+              .\.venv\Scripts\pip install pytest pytest-cov
 
-        - script: |
-            echo Running pytest…
-            if exist $(TESTS_DIR) (
-              pytest -q $(TESTS_DIR) --junitxml=$(Build.SourcesDirectory)\test-results.xml
-            ) else (
-              echo "No tests/ directory found, skipping tests."
-              echo "<testsuite></testsuite>" > $(Build.SourcesDirectory)\test-results.xml
-            )
-          displayName: 'Run tests (pytest)'
-          continueOnError: false
+        # Run tests and produce JUnit XML
+        - task: PowerShell@2
+          displayName: Run pytest
+          inputs:
+            targetType: inline
+            script: |
+              if (Test-Path test-results) { Remove-Item test-results -Recurse -Force }
+              .\.venv\Scripts\pytest -q --junitxml=test-results\pytest.xml --cov=src --cov-report=xml
 
         - task: PublishTestResults@2
+          displayName: Publish test results (JUnit)
           inputs:
             testResultsFormat: 'JUnit'
-            testResultsFiles: '$(Build.SourcesDirectory)\test-results.xml'
-            testRunTitle: 'pytest'
+            testResultsFiles: 'test-results\pytest.xml'
             failTaskOnFailedTests: true
-          displayName: 'Publish test results'
 
-        # Create a deployable ZIP: src + requirements.txt (matches your tree)
-        - powershell: |
-            $zip = "$(Build.ArtifactStagingDirectory)\$(ZIP_NAME)"
-            if (Test-Path $zip) { Remove-Item $zip -Force }
-            $paths = @()
-            if (Test-Path "$(Build.SourcesDirectory)\$(SRC_DIR)") { $paths += "$(Build.SourcesDirectory)\$(SRC_DIR)\*" }
-            if (Test-Path "$(Build.SourcesDirectory)\requirements.txt") { $paths += "$(Build.SourcesDirectory)\requirements.txt" }
-            if ($paths.Count -eq 0) { throw "Nothing to package: src/ and requirements.txt not found." }
-            Compress-Archive -Path $paths -DestinationPath $zip -Force
-            Write-Host "Packaged $zip"
-          displayName: 'Package app.zip'
-
-        - task: PublishPipelineArtifact@1
+        # Package app into a zip (exclude venv, .git, etc.)
+        - task: ArchiveFiles@2
+          displayName: Zip app
           inputs:
-            targetPath: '$(Build.ArtifactStagingDirectory)'
-            artifact: '$(ARTIFACT_NAME)'
-          displayName: 'Publish artifact'
+            rootFolderOrFile: '$(Build.SourcesDirectory)'
+            includeRootFolder: false
+            archiveType: 'zip'
+            archiveFile: '$(Build.ArtifactStagingDirectory)\app.zip'
+            replaceExistingArchive: true
+            verbose: true
+            # Exclusions
+            # Use newline-separated patterns on Windows:
+            #  Note: patterns are globbed relative to rootFolderOrFile
+            #  The below excludes common junk from the package
+            #  (You can refine as you like.)
+            tarCompression: none
+          # ArchiveFiles@2 lacks first-class excludes on Windows; easiest is to zip only what you need:
+        - task: PowerShell@2
+          displayName: Rebuild zip with only needed files
+          inputs:
+            targetType: inline
+            script: |
+              if (Test-Path "$(Build.ArtifactStagingDirectory)\app.zip") { Remove-Item "$(Build.ArtifactStagingDirectory)\app.zip" -Force }
+              $items = @(
+                "src",
+                "run.bat",
+                "run.sh",
+                "requirements.txt",
+                "pyproject.toml"
+              )
+              Add-Type -AssemblyName System.IO.Compression.FileSystem
+              $zipPath = "$(Build.ArtifactStagingDirectory)\app.zip"
+              [System.IO.Compression.ZipFile]::CreateFromDirectory(".", $zipPath) # quick pre-zip
+              # Recreate with curated content:
+              Remove-Item $zipPath -Force
+              $temp = "$(Build.ArtifactStagingDirectory)\_pkg"
+              if (Test-Path $temp) { Remove-Item $temp -Recurse -Force }
+              New-Item $temp -ItemType Directory | Out-Null
+              foreach ($i in $items) {
+                Copy-Item $i -Destination (Join-Path $temp $i) -Recurse -Force
+              }
+              [System.IO.Compression.ZipFile]::CreateFromDirectory($temp, $zipPath)
+              Remove-Item $temp -Recurse -Force
 
-# ---------- 2) Deploy to DEV (branch: dev) ----------
-- stage: deploy_dev
-  displayName: 'Deploy to Dev (calc-dev-web)'
-  dependsOn: build_test
+        - task: PublishBuildArtifacts@1
+          displayName: Publish artifact
+          inputs:
+            PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+            ArtifactName: '$(packageDir)'
+
+# -----------------------------
+# Deploy to Dev (branch = dev)
+# -----------------------------
+- stage: Deploy_Dev
+  displayName: Deploy to Dev (calc-dev-web)
+  dependsOn: Build_Test
   condition: and(succeeded(), eq(variables['Build.SourceBranchName'], 'dev'))
   jobs:
-    - deployment: deploy
-      displayName: 'Zip Deploy to calc-dev-web'
+    - deployment: deploy_dev
+      displayName: Zip Deploy to Dev Web
       environment: 'dev-web'
       strategy:
         runOnce:
           deploy:
             steps:
               - download: current
-                artifact: '$(ARTIFACT_NAME)'
+                artifact: 'drop'
+              - task: AzureWebApp@1
+                displayName: Deploy to $(DEV_WEBAPP)
+                inputs:
+                  azureSubscription: '$(serviceConnection)'
+                  appType: 'webApp'
+                  appName: '$(DEV_WEBAPP)'
+                  package: '$(Pipeline.Workspace)\drop\app.zip'
 
-              # Use DEV_PUBPROFILE secret (full XML) → extract ZipDeploy creds and post to Kudu
-              - powershell: |
-                  if (-not "$(DEV_PUBPROFILE)") { throw "Pipeline variable DEV_PUBPROFILE is empty." }
-                  $xmlPath = "$(Agent.TempDirectory)\dev.publishsettings"
-                  "$(DEV_PUBPROFILE)" | Out-File -FilePath $xmlPath -Encoding utf8
-
-                  [xml]$pp = Get-Content $xmlPath
-                  $node = $pp.publishData.publishProfile | Where-Object { $_.publishMethod -eq "ZipDeploy" }
-                  if (-not $node) { throw "ZipDeploy profile not found in DEV publish settings." }
-
-                  $user = $node.userName
-                  $pwd  = $node.userPWD
-                  # Prefer explicit scmUri if present; else construct from app name
-                  $zipEndpoint = if ($node.scmUri) {
-                      $node.scmUri.TrimEnd('/') + "/api/zipdeploy"
-                    } else {
-                      # Fallback: derive app host from destinationAppUrl
-                      $appHost = ([uri]$node.destinationAppUrl).Host.Split('.')[0]
-                      "https://$appHost.scm.azurewebsites.net/api/zipdeploy"
-                    }
-
-                  $zip = "$(Pipeline.Workspace)\$(ARTIFACT_NAME)\$(ZIP_NAME)"
-                  if (-not (Test-Path $zip)) { throw "ZIP not found: $zip" }
-
-                  $pair   = "{0}:{1}" -f $user,$pwd
-                  $bytes  = [System.Text.Encoding]::ASCII.GetBytes($pair)
-                  $basic  = [Convert]::ToBase64String($bytes)
-                  $header = @{ Authorization = "Basic $basic" }
-
-                  Write-Host "Deploying to $zipEndpoint ..."
-                  $resp = Invoke-WebRequest -Uri $zipEndpoint -Headers $header -Method POST -InFile $zip -ContentType "application/zip"
-                  Write-Host "Kudu response: $($resp.StatusCode)"
-                  if ($resp.StatusCode -lt 200 -or $resp.StatusCode -ge 300) { throw "ZipDeploy failed." }
-                displayName: 'Kudu ZIP Deploy (DEV)'
-
-# ---------- 3) Deploy to PROD (branch: main) ----------
-- stage: deploy_prod
-  displayName: 'Deploy to Prod (calc-prod-web)'
-  dependsOn: build_test
+# -----------------------------
+# Deploy to Prod (branch = main)
+# -----------------------------
+- stage: Deploy_Prod
+  displayName: Deploy to Prod (calc-prod-web)
+  dependsOn: Build_Test
   condition: and(succeeded(), eq(variables['Build.SourceBranchName'], 'main'))
   jobs:
-    - deployment: deploy
-      displayName: 'Zip Deploy to calc-prod-web'
+    - deployment: deploy_prod
+      displayName: Zip Deploy to Prod Web
       environment: 'prod-web'
       strategy:
         runOnce:
           deploy:
             steps:
               - download: current
-                artifact: '$(ARTIFACT_NAME)'
-
-              - powershell: |
-                  if (-not "$(PROD_PUBPROFILE)") { throw "Pipeline variable PROD_PUBPROFILE is empty." }
-                  $xmlPath = "$(Agent.TempDirectory)\prod.publishsettings"
-                  "$(PROD_PUBPROFILE)" | Out-File -FilePath $xmlPath -Encoding utf8
-
-                  [xml]$pp = Get-Content $xmlPath
-                  $node = $pp.publishData.publishProfile | Where-Object { $_.publishMethod -eq "ZipDeploy" }
-                  if (-not $node) { throw "ZipDeploy profile not found in PROD publish settings." }
-
-                  $user = $node.userName
-                  $pwd  = $node.userPWD
-                  $zipEndpoint = if ($node.scmUri) {
-                      $node.scmUri.TrimEnd('/') + "/api/zipdeploy"
-                    } else {
-                      $appHost = ([uri]$node.destinationAppUrl).Host.Split('.')[0]
-                      "https://$appHost.scm.azurewebsites.net/api/zipdeploy"
-                    }
-
-                  $zip = "$(Pipeline.Workspace)\$(ARTIFACT_NAME)\$(ZIP_NAME)"
-                  if (-not (Test-Path $zip)) { throw "ZIP not found: $zip" }
-
-                  $pair   = "{0}:{1}" -f $user,$pwd
-                  $bytes  = [System.Text.Encoding]::ASCII.GetBytes($pair)
-                  $basic  = [Convert]::ToBase64String($bytes)
-                  $header = @{ Authorization = "Basic $basic" }
-
-                  Write-Host "Deploying to $zipEndpoint ..."
-                  $resp = Invoke-WebRequest -Uri $zipEndpoint -Headers $header -Method POST -InFile $zip -ContentType "application/zip"
-                  Write-Host "Kudu response: $($resp.StatusCode)"
-                  if ($resp.StatusCode -lt 200 -or $resp.StatusCode -ge 300) { throw "ZipDeploy failed." }
-                displayName: 'Kudu ZIP Deploy (PROD)'
+                artifact: 'drop'
+              - task: AzureWebApp@1
+                displayName: Deploy to $(PROD_WEBAPP)
+                inputs:
+                  azureSubscription: '$(serviceConnection)'
+                  appType: 'webApp'
+                  appName: '$(PROD_WEBAPP)'
+                  package: '$(Pipeline.Workspace)\drop\app.zip'
