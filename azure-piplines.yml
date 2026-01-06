@@ -1,59 +1,123 @@
+# CI on dev, CD to Dev App Service; CD to Prod on main
 trigger:
-  branches: { include: [ dev ] }   # CI on dev
+  branches:
+    include: [dev, main]
 
 pr:
-  branches: { include: [ dev ] }
-
-pool: { vmImage: ubuntu-latest }
+  branches:
+    include: [dev, main]
 
 variables:
-  pythonVersion: '3.12'
-  artifactName: 'drop'
+  PYTHON_EXE: 'python'              # your agent already has Python; adjust if needed
+  TEST_RESULTS: 'tests/test-results.xml'
+  ARTIFACT_NAME: 'drop'
+  PACKAGE_ZIP: '$(Pipeline.Workspace)/drop/app.zip'
+
+  # ---- change these to your actual names ----
+  AZURE_SERVICE_CONNECTION: 'az-sc'     # Service Connection name you created
+  DEV_WEBAPP: 'calc-dev-web'
+  PROD_WEBAPP: 'calc-prod-web'
+
+pool:
+  name: Default   # your self-hosted agent pool
 
 stages:
-- stage: CI
+# ===================== BUILD & TEST =====================
+- stage: Build_Test
   displayName: Build & Test
   jobs:
-  - job: test
+  - job: build
     steps:
-    - task: UsePythonVersion@0
-      inputs: { versionSpec: '$(pythonVersion)' }
+    - checkout: self
+      clean: true
 
-    - script: python -m pip install --upgrade pip
-      displayName: Upgrade pip
-
-    - script: pip install -r requirements.txt
-      displayName: Install app dependencies
-
+    # Ensure pip is fresh and deps installed
     - script: |
-        pip install pytest pytest-azurepipelines
-        pytest -q
-      displayName: Run unit tests
+        $(PYTHON_EXE) -m pip install --upgrade pip
+        $(PYTHON_EXE) -m pip install -r requirements.txt
+      displayName: Install dependencies
+
+    # Run tests and emit JUnit for publishing
+    - script: |
+        $(PYTHON_EXE) -m pytest -q --junitxml $(TEST_RESULTS)
+      displayName: Run pytest
+
+    - task: PublishTestResults@2
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: '$(TEST_RESULTS)'
+        failTaskOnFailedTests: true
+      displayName: Publish test results
+
+    # Package repo for deployment (zip)
+    - task: ArchiveFiles@2
+      displayName: Create deployment package (zip)
+      inputs:
+        rootFolderOrFile: '$(Build.SourcesDirectory)'
+        includeRootFolder: false
+        archiveType: 'zip'
+        archiveFile: '$(Build.ArtifactStagingDirectory)/app.zip'
+        verbose: true
 
     - task: PublishBuildArtifacts@1
       inputs:
-        pathToPublish: '$(Build.SourcesDirectory)'
-        artifactName: '$(artifactName)'
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: '$(ARTIFACT_NAME)'
+        publishLocation: 'Container'
+      displayName: Publish artifact
 
-- stage: CD_Dev
+# ===================== DEPLOY TO DEV =====================
+- stage: Deploy_Dev
   displayName: Deploy to Dev Web App
-  dependsOn: CI
-  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/dev'))
+  dependsOn: Build_Test
+  condition: and(succeeded(), eq(variables['Build.SourceBranchName'], 'dev'))
   jobs:
   - deployment: deploy_dev
-    environment: 'dev'
+    displayName: Deploy to Dev
+    environment: 'dev-web'
     strategy:
       runOnce:
         deploy:
           steps:
           - download: current
-            artifact: $(artifactName)
+            artifact: 'drop'
 
+          # Ensure site will build on App Service (Oryx / Kudu builds)
           - task: AzureWebApp@1
-            displayName: 'Deploy to calc-dev-web'
+            displayName: Deploy to $(DEV_WEBAPP)
             inputs:
-              azureSubscription: 'sc-azure-calculator'
-              appType: 'webAppLinux'
-              appName: 'calc-dev-web'
-              package: '$(Pipeline.Workspace)/$(artifactName)'
-              runtimeStack: 'PYTHON|3.12'
+              azureSubscription: '$(AZURE_SERVICE_CONNECTION)'
+              appType: 'webApp'
+              appName: '$(DEV_WEBAPP)'
+              package: '$(Pipeline.Workspace)/drop/app.zip'
+              appSettings: |
+                -SCM_DO_BUILD_DURING_DEPLOYMENT true
+                -FLASK_APP src/app.py
+                -FLASK_ENV production
+
+# ===================== DEPLOY TO PROD =====================
+- stage: Deploy_Prod
+  displayName: Deploy to Prod Web App
+  dependsOn: Build_Test
+  condition: and(succeeded(), eq(variables['Build.SourceBranchName'], 'main'))
+  jobs:
+  - deployment: deploy_prod
+    displayName: Deploy to Prod
+    environment: 'prod-web'     # put an approval here if you want
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: current
+            artifact: 'drop'
+          - task: AzureWebApp@1
+            displayName: Deploy to $(PROD_WEBAPP)
+            inputs:
+              azureSubscription: '$(AZURE_SERVICE_CONNECTION)'
+              appType: 'webApp'
+              appName: '$(PROD_WEBAPP)'
+              package: '$(Pipeline.Workspace)/drop/app.zip'
+              appSettings: |
+                -SCM_DO_BUILD_DURING_DEPLOYMENT true
+                -FLASK_APP src/app.py
+                -FLASK_ENV production
