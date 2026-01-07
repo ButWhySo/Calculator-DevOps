@@ -36,6 +36,10 @@ def index():
                 if a < 0:
                     raise ValueError("sqrt domain error")
                 result = a ** 0.5
+            elif op == "ln" :
+                if a<=0:
+                    raise ValueError("ln domain error")
+                result = math.log(a)
             else:
                 b = float(request.form.get("b", "0"))
                 if op == "add":
@@ -48,10 +52,7 @@ def index():
                     if b == 0:
                         raise ZeroDivisionError("division by zero")
                     result = a / b
-                elif op == "ln" :
-                    if a<=0:
-                        raise ValueError("sqrt domain error")
-                    result = math.log(a)
+
         except Exception as e:
             result = f"Error: {e}"
     return render_template_string(PAGE, result=result)
