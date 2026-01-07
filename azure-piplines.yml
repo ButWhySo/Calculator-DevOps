@@ -12,7 +12,7 @@ variables:
   PACKAGE_ZIP: 'app.zip'
 
   # Azure service connection (ARM)
-  AZURE_SERVICE_CONNECTION: 'My-ARM-Conn'   # <-- change to your service connection name
+  AZURE_SERVICE_CONNECTION: 'sc-azure-calculator'   # <-- change to your service connection name
 
   # Dev app
   DEV_RG: 'rg-dev'                           # <-- change
