@@ -45,7 +45,7 @@ def index():
                 if op == "add":
                     result = a + b
                 elif op == "sub":
-                    result = a- b
+                    result = a - b
                 elif op == "mul":
                     result = a * b
                 elif op == "div":
