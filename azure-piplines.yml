@@ -1,148 +1,95 @@
-# -----------------------------------------
-# variables you already created as secrets:
-# DEV_PUBPROFILE, PROD_PUBPROFILE
-# -----------------------------------------
+# azure-pipelines.yml  (Variant A - RG/service connection; Ubuntu hosted)
+# Prereqs:
+# 1) Create an Azure service connection named in AZURE_SERVICE_CONNECTION.
+# 2) Ensure both apps are Linux "Code" Web Apps (F1 ok).
+# 3) run.sh exists at repo root and starts the app (uses $PORT).
 
-stages:
-# ===== Build & Test =====
-- stage: Build_Test
-  displayName: Build + Test + Package
-  jobs:
-  - job: build
-    displayName: Build & Test
-    pool:
-      name: Default
-      demands:
-      - Agent.OS -equals Windows_NT
-    variables:
-      packageDir: 'drop'
-    steps:
-    - checkout: self
-      clean: true
+trigger:
+- main
 
-    - task: CmdLine@2
-      displayName: Show agent Python
-      inputs:
-        script: |
-          ver
-          where py
-          py -3 --version
+variables:
+  PYTHON_VERSION: '3.10'
+  PACKAGE_ZIP: 'app.zip'
 
-    - task: CmdLine@2
-      displayName: Create venv & install deps
-      inputs:
-        script: |
-          py -3 -m venv .venv
-          .venv\Scripts\python -m pip install --upgrade pip wheel
-          .venv\Scripts\pip install -r requirements.txt
-          .venv\Scripts\pip install pytest pytest-cov
+  # Azure service connection (ARM)
+  AZURE_SERVICE_CONNECTION: 'My-ARM-Conn'   # <-- change to your service connection name
 
-    - task: CmdLine@2
-      displayName: Run pytest (with coverage)
-      inputs:
-        script: |
-          if exist test-results rmdir /s /q test-results
-          mkdir test-results
-          .venv\Scripts\python -m pytest -q tests --junitxml=test-results\pytest.xml --cov=src --cov-report=xml
+  # Dev app
+  DEV_RG: 'rg-dev'                           # <-- change
+  DEV_APP: 'calc-dev-web'                    # <-- change
 
-    - task: PublishTestResults@2
-      displayName: Publish test results (JUnit)
-      inputs:
-        testResultsFormat: 'JUnit'
-        testResultsFiles: 'test-results\pytest.xml'
-        failTaskOnFailedTests: true
+  # Prod app
+  PROD_RG: 'rg-prod'                         # <-- change
+  PROD_APP: 'calc-prod-web'                  # <-- change
 
-    - task: CmdLine@2
-      displayName: Zip app
-      inputs:
-        script: |
-          if exist "$(Build.ArtifactStagingDirectory)\app.zip" del /q "$(Build.ArtifactStagingDirectory)\app.zip"
-          if exist _pkg rmdir /s /q _pkg
-          mkdir _pkg
-          xcopy /e /i /y src _pkg\src
-          if exist run.sh copy /y run.sh _pkg\
-          if exist run.bat copy /y run.bat _pkg\
-          if exist requirements.txt copy /y requirements.txt _pkg\
-          if exist pyproject.toml copy /y pyproject.toml _pkg\
-          powershell -NoLogo -NoProfile -Command ^
-            "Add-Type -AssemblyName System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::CreateFromDirectory('_pkg', '$(Build.ArtifactStagingDirectory)\app.zip')"
-          rmdir /s /q _pkg
+pool:
+  vmImage: 'ubuntu-latest'
 
-    - task: PublishBuildArtifacts@1
-      displayName: Publish artifact
-      inputs:
-        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
-        ArtifactName: 'drop'
+steps:
+- checkout: self
+  clean: true
 
-# ===== Deploy DEV (Linux) =====
-- stage: Deploy_Dev
-  displayName: Deploy to Dev (calc-dev-web)
-  dependsOn: Build_Test
-  condition: succeeded()
-  jobs:
-  - deployment: deploy_dev
-    environment: dev-web
-    strategy:
-      runOnce:
-        deploy:
-          pool:
-            name: Default
-            demands:
-            - Agent.OS -equals Windows_NT
-          steps:
-          - download: current
-            artifact: drop
+- task: UsePythonVersion@0
+  inputs:
+    versionSpec: '$(PYTHON_VERSION)'
 
-          # Ensure Linux app knows how to start: use run.sh at zip root
-          - task: AzureAppServiceSettings@1
-            displayName: App settings + startup (Linux)
-            inputs:
-              appName: 'calc-dev-web'
-              appSettings: |
-                -name SCM_DO_BUILD_DURING_DEPLOYMENT -value false -slotSetting false
-                -name WEBSITES_ENABLE_APP_SERVICE_STORAGE -value true -slotSetting false
-              startupCommand: 'bash run.sh'
+- script: |
+    python3 --version
+    python3 -m venv .venv
+    . .venv/bin/activate
+    python -m pip install --upgrade pip wheel
+    if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+    pip install pytest pytest-cov
+  displayName: Setup venv & install deps
 
-          - task: AzureWebApp@1
-            displayName: Zip Deploy to calc-dev-web (publish profile)
-            inputs:
-              appType: 'webAppLinux'
-              appName: 'calc-dev-web'
-              package: '$(Pipeline.Workspace)/drop/app.zip'
-              publishProfile: '$(DEV_PUBPROFILE)'
+- script: |
+    . .venv/bin/activate
+    rm -rf test-results || true
+    mkdir -p test-results
+    python -m pytest -q tests --junitxml=test-results/pytest.xml --cov=src --cov-report=xml
+  displayName: Run pytest (with coverage)
 
-# ===== Deploy PROD (Linux) =====
-- stage: Deploy_Prod
-  displayName: Deploy to Prod (calc-prod-web)
-  dependsOn: Deploy_Dev
-  condition: succeeded()
-  jobs:
-  - deployment: deploy_prod
-    environment: prod-web
-    strategy:
-      runOnce:
-        deploy:
-          pool:
-            name: Default
-            demands:
-            - Agent.OS -equals Windows_NT
-          steps:
-          - download: current
-            artifact: drop
+- task: PublishTestResults@2
+  inputs:
+    testResultsFormat: 'JUnit'
+    testResultsFiles: 'test-results/pytest.xml'
+    failTaskOnFailedTests: true
+  displayName: Publish tests
 
-          - task: AzureAppServiceSettings@1
-            displayName: App settings + startup (Linux)
-            inputs:
-              appName: 'calc-prod-web'
-              appSettings: |
-                -name SCM_DO_BUILD_DURING_DEPLOYMENT -value false -slotSetting false
-                -name WEBSITES_ENABLE_APP_SERVICE_STORAGE -value true -slotSetting false
-              startupCommand: 'bash run.sh'
+# Package (Linux-friendly zip)
+- script: |
+    rm -f $(PACKAGE_ZIP)
+    rm -rf _pkg
+    mkdir -p _pkg/src
+    cp -R src/* _pkg/src/ 2>/dev/null || true
+    [ -f run.sh ] && cp run.sh _pkg/
+    [ -f run.bat ] && cp run.bat _pkg/
+    [ -f requirements.txt ] && cp requirements.txt _pkg/
+    [ -f pyproject.toml ] && cp pyproject.toml _pkg/
+    (cd _pkg && zip -r ../$(PACKAGE_ZIP) .)
+    rm -rf _pkg
+  displayName: Zip app
 
-          - task: AzureWebApp@1
-            displayName: Zip Deploy to calc-prod-web (publish profile)
-            inputs:
-              appType: 'webAppLinux'
-              appName: 'calc-prod-web'
-              package: '$(Pipeline.Workspace)/drop/app.zip'
-              publishProfile: '$(PROD_PUBPROFILE)'
+# ---- Deploy to DEV (RG/service connection) ----
+- task: AzureWebApp@1
+  displayName: Deploy to DEV (RG/service connection)
+  inputs:
+    azureSubscription: '$(AZURE_SERVICE_CONNECTION)'
+    appType: 'webAppLinux'
+    appName: '$(DEV_APP)'
+    resourceGroupName: '$(DEV_RG)'
+    package: '$(Build.SourcesDirectory)/$(PACKAGE_ZIP)'
+    runtimeStack: 'PYTHON|3.10'             # optional; harmless for code startup
+    startupCommand: 'bash run.sh'            # run.sh must bootstrap gunicorn on $PORT
+
+# ---- Deploy to PROD (RG/service connection) ----
+- task: AzureWebApp@1
+  displayName: Deploy to PROD (RG/service connection)
+  inputs:
+    azureSubscription: '$(AZURE_SERVICE_CONNECTION)'
+    appType: 'webAppLinux'
+    appName: '$(PROD_APP)'
+    resourceGroupName: '$(PROD_RG)'
+    package: '$(Build.SourcesDirectory)/$(PACKAGE_ZIP)'
+    runtimeStack: 'PYTHON|3.10'
+    startupCommand: 'bash run.sh'
