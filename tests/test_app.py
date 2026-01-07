@@ -17,3 +17,11 @@ def test_sqrt_zero(client):
 def test_sqrt_negative_is_domain_error(client):
     r = client.post("/", data={"a": "-9", "op": "sqrt"})
     assert b"domain error" in r.data.lower()
+ # create tests for zro and non negative input checks in natural log.
+def test_ln_neg_inpt(client):
+    r = client.post("/", data={"a": "-9", "op": "ln"})
+    assert b"domain error" in r.data.lower()
+
+def test_ln_zero_inpt(client):
+    r = client.post("/", data={"a": "0", "op": "ln"})
+    assert b"domain error" in r.data.lower()

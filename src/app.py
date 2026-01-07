@@ -1,5 +1,5 @@
 from flask import Flask, render_template_string, request
-
+import math
 app = Flask(__name__)
 
 # very small HTML so you can see it working immediately
@@ -15,8 +15,9 @@ PAGE = """
     <option value="mul">×</option>
     <option value="div">÷</option>
     <option value="sqrt">√a</option>
+    <option value="ln">ln a</option>
   </select>
-  <input name="b" type="number" step="any" placeholder="b (ignored for √)" />
+  <input name="b" type="number" step="any" placeholder="b (ignored for √,ln)" />
   <button type="submit">Compute</button>
 </form>
 {% if result is not none %}
@@ -47,6 +48,10 @@ def index():
                     if b == 0:
                         raise ZeroDivisionError("division by zero")
                     result = a / b
+                elif op == "ln" :
+                    if a<=0:
+                        raise ValueError("sqrt domain error")
+                    result = math.log(a)
         except Exception as e:
             result = f"Error: {e}"
     return render_template_string(PAGE, result=result)
